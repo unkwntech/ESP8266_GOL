@@ -12,9 +12,12 @@
 #define COLUMNS 16
 #define PIXELCOUNT COLUMNS*ROWS
 #define OUPUTPIN 2
-#define WIFIWAITCOUNT 25
+#define WIFIWAITCOUNT 100
 #define BRIGHTNESS 1
 
+#define RED_OFFSET 1
+#define GREEN_OFFSET 1
+#define BLUE_OFFSET 2
 
 //Include NPT Client to get current time after startup.
 WiFiUDP ntpUDP;
@@ -23,27 +26,40 @@ NTPClient timeClient(ntpUDP);
 //Setup LED "strip"
 NeoPixelBus<NeoGrbFeature, NeoEsp8266Dma800KbpsMethod> strip(PIXELCOUNT, OUPUTPIN);
 //Create colour shorthands for later use
-RgbColor red(BRIGHTNESS, 0, 0);
-RgbColor green(0, BRIGHTNESS, 0);
-RgbColor blue(0, 0, BRIGHTNESS);
+RgbColor red(BRIGHTNESS * RED_OFFSET, 0, 0);
+RgbColor green(0, BRIGHTNESS * GREEN_OFFSET, 0);
+RgbColor blue(0, 0, BRIGHTNESS * BLUE_OFFSET);
 RgbColor white(BRIGHTNESS);
+RgbColor purple(BRIGHTNESS * RED_OFFSET, 0, BRIGHTNESS * BLUE_OFFSET * 2);
 RgbColor black(0);
 
 //Fields for GOL
-//Each row is an int with each bit representing a single cell
-int field[ROWS] = {};
+/*
+    BIT     USE
+    8 (MSB) Alive/Dead
+    7       New Cell
+    6       Newly Dead Cell
+*/
+byte field[ROWS][COLUMNS];
 //Copy for calculations
-int fieldCopy[ROWS] = {};
+byte fieldCopy[ROWS][COLUMNS];
 
+byte priorFields[2][ROWS][COLUMNS];
+
+#define ALIVE_CELL 1 << 7          //1000 0000
+#define NEWLY_BORN 1 << 6          //0100 0000
+#define NEWLY_DIED 1 << 5          //0010 0000
+#define CHANGED 1 << 4             //0001 0000
+#define DEAD_CELL ~ALIVE_CELL      //0111 1111
 
 //function stubs
 unsigned long getTime();
 void writeField();
 void evolve();
-void printField(int f[]);
+void printField();
+void generateRandomField();
 
 void setup() {
-
     //setup serial connection
     Serial.begin(115200);
 
@@ -70,20 +86,14 @@ void setup() {
         randomSeed(getTime());
     }
     
-    //Setup and blank the LEDS
     strip.Begin();
-
-    //init field
-    for(int i = 0; i < ROWS; i++)
-        field[i] = 0;
-    
+    generateRandomField();
     writeField();
-    
 }
 
 void loop() {
     //only run loop once / second(ish)
-    delay(10000);
+    delay(1000);
     evolve();
     writeField();
 }
@@ -96,65 +106,104 @@ void evolve() {
     */
 
    int neighbors = 0;
-   //Copy field to fieldCopy
-   std::copy(std::begin(field), std::end(field), std::begin(fieldCopy));
+   
+   if(!memcmp(priorFields[0], field, sizeof(byte) * ROWS * COLUMNS)) {
+        generateRandomField();
+        return;
+   }
+   //Copy field to fieldCopy and prior fields
+   for(int row = 0; row < ROWS; row++){
+    for(int col = 0; col < COLUMNS; col++) {
+        priorFields[0][row][col] = priorFields[1][row][col];
+        priorFields[1][row][col] = field[row][col];
+        fieldCopy[row][col] = field[row][col];
+    }
+   }
+   
 
    for(int row = 0; row < ROWS; row++) {
         for(int col = 0; col < COLUMNS; col++) {
             neighbors = 0;
             //row - 1, col
-            if(row != 0 && (field[row - 1] & (1 << (col))) > 0)
+            if(row != 0 && field[row - 1][col] >= ALIVE_CELL)
                     neighbors++;
             //row + 1, col
-            if(row +1 != ROWS && (field[row + 1] & (1 << col)) > 0)
+            if(row +1 != ROWS && field[row + 1][col] >= ALIVE_CELL)
                 neighbors++;
             //row, col - 1
-            if(col != 0 && (field[row] & (1 << ((col) - 1))) > 0)
+            if(col != 0 && field[row][col - 1] >= ALIVE_CELL)
                 neighbors++;
             //row, col + 1
-            if(col + 1 != COLUMNS && (field[row] & (1 << ((col) + 1))) > 0)
+            if(col + 1 != COLUMNS && field[row][col + 1] >= ALIVE_CELL)
                 neighbors++;
             //row -1, col -1
-            if(row != 0 && col != 0 && (field[row - 1] & (1 << (col - 1))) > 0)
+            if(row != 0 && col != 0 && field[row - 1][col - 1] >= ALIVE_CELL)
               neighbors++;
             //row - 1, col +1
-            if(row != 0 && col != COLUMNS && (field[row - 1] & (1 << (col + 1))) > 0)
+            if(row != 0 && col + 1 != COLUMNS && field[row - 1][col + 1] >= ALIVE_CELL)
               neighbors++;
             //row + 1, col -1
-            if(row != ROWS && col != 0 && (field[row + 1] & (1 << (col - 1))) > 0)
+            if(row + 1 != ROWS && col != 0 && field[row + 1][col - 1] >= ALIVE_CELL)
               neighbors++;
             //row + 1, col + 1
-            if(row != ROWS && col != COLUMNS && (field[row + 1] & (1 << (col + 1))) > 0)
+            if(row + 1 != ROWS && col + 1 != COLUMNS && field[row + 1][col + 1] >= ALIVE_CELL)
               neighbors++;
 
             //overcrowded or solitary
-            if(neighbors > 3 || neighbors < 2){
-                fieldCopy[row] = fieldCopy[row] & ~(1 << col);
+            if(field[row][col] >= ALIVE_CELL && (neighbors > 3 || neighbors < 2)){
+                fieldCopy[row][col] &= DEAD_CELL;
+                fieldCopy[row][col] |= NEWLY_DIED | CHANGED;
             }
             //unerpopulated
-            else if (neighbors == 3){
-                fieldCopy[row] = fieldCopy[row] | (1 << col);
+            else if (field[row][col] < ALIVE_CELL && neighbors == 3){
+                fieldCopy[row][col] |= ALIVE_CELL | NEWLY_BORN | CHANGED;
             }
         }
     }
 
     //Write the working field back to the main field
-    std::copy(std::begin(fieldCopy), std::end(fieldCopy), std::begin(field));
+    //memcpy(field, fieldCopy, ROWS * COLUMNS);
+    for(int row = 0; row < ROWS; row++){
+        for(int col = 0; col < COLUMNS; col++) {
+            field[row][col] = fieldCopy[row][col];
+        }
+    }
+    //printField();
 }
 
 /*
     Print field to serial
 */
-void printField(int f[]) {
+void printField() {
+    Serial.println();
     for(int row = 0; row < ROWS; row++){
         for(int col = 0; col < COLUMNS; col++) {
-            if((f[row] & (1 << col)) > 0) {
-                Serial.print("X");
+            if((field[row][col] & ALIVE_CELL) > 0) {
+                if((field[row][col] & NEWLY_BORN) > 0)
+                    Serial.print("B");
+                else
+                    Serial.print("X");
             } else {
-                Serial.print("-");
+                if((field[row][col] & NEWLY_DIED) > 0)
+                    Serial.print("D");
+                else
+                    Serial.print("-");
             }
         }
         Serial.println();
+    }
+        Serial.println();
+        Serial.println();
+}
+
+/*
+    Generate a random field.
+*/
+void generateRandomField() {
+    for(int row = 0; row < ROWS; row++) {
+        for(int col = 0; col < COLUMNS; col++){
+            field[row][col] = (random(255) & ALIVE_CELL) | CHANGED;
+        }
     }
 }
 
@@ -165,14 +214,53 @@ void writeField() {
     /*
         The LED Matrix is just a strip of LEDs
     */
-    int pixelCount = 0;
+    unsigned int pixelCount = 0;
+    unsigned int address =0;
+    RgbColor color = purple;
     for(int row = 0; row < ROWS; row++) {
         for(int col = 0; col < COLUMNS; col++) {
-            if(field[row] & 1 << col)
-                strip.SetPixelColor(pixelCount, green);
-            else
-                strip.SetPixelColor(pixelCount, black);
+            //If the cell has not been changed since last write skip it.
+            if((field[row][col] & CHANGED) == 0) {
+                pixelCount++;
+                continue;
+            }
+
+            field[row][col] &= ~CHANGED;
+            color = purple;
+            //cell is alive
+            if((field[row][col] & ALIVE_CELL) > 0) {
+                if((field[row][col] & NEWLY_BORN) > 0) {
+                    //cell is newly alive
+                    color = green;
+                    field[row][col] = (field[row][col] & ~NEWLY_BORN) | CHANGED;
+                } else {
+                    //cell was already alive
+                    color = purple;
+                }
+            //cell is dead
+            } else {
+                if ((field[row][col] & NEWLY_DIED) > 0) {
+                    //cell is newly dead
+                    color = red;
+                    field[row][col] = (field[row][col] & ~NEWLY_DIED) | CHANGED;
+                } else {
+                    //cell was already dead
+                    color = black;
+                }
+            }
+
+            if(row % 2 != 0) {
+                address = row * COLUMNS + (COLUMNS - col) - 1;
+            } else {
+                address = pixelCount;
+            }
+
+            strip.SetPixelColor(address, color);
+
             pixelCount++;
+            
+            //Missing some pixels, slow down the writes a bit
+            delay(5);
         }
     }
     strip.Show();
