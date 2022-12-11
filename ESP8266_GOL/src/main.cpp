@@ -39,6 +39,7 @@ RgbColor black(0);
     8 (MSB) Alive/Dead
     7       New Cell
     6       Newly Dead Cell
+    5       Cell has changed since laste draw
 */
 byte field[ROWS][COLUMNS];
 //Copy for calculations
@@ -212,7 +213,7 @@ void generateRandomField() {
 */
 void writeField() {
     /*
-        The LED Matrix is just a strip of LEDs
+        The LED Matrix is just a strip of LEDs that snakes around
     */
     unsigned int pixelCount = 0;
     unsigned int address =0;
@@ -249,6 +250,9 @@ void writeField() {
                 }
             }
 
+            //adjust for "sanke" pattern of LEDs
+            //Pixel 0 is row 0, col 0
+            //Pixel 17 is row 1, col 16
             if(row % 2 != 0) {
                 address = row * COLUMNS + (COLUMNS - col) - 1;
             } else {
